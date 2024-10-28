@@ -62,26 +62,28 @@ source.configure_call = function(self, user_prompt, completion_config, is_stream
     system = completion_config.system,
     max_tokens = 8192
   }
-
-  vim.print(vim.inspect(headers) .. vim.inspect(body) .. ' url ' .. url)
   return url, headers, body
 end
 
 source.complete_cb = function(raw_response)
   local response = vim.fn.json_decode(raw_response.body)
+
   local input_tokens = response.usage.input_tokens
   local output_tokens = response.usage.output_tokens
   local content = response.content
   if content[1].type == 'text' then
-    return content[1].text, input_tokens, output_tokens
+    return {
+      content = content[1].text,
+      input_tokens = input_tokens,
+      output_tokens = output_tokens,
+    }
   else
-    error('unexpected response type')
+    error('Unexpected response type from OpenAI completion')
   end
 end
 
 source.stream_cb = function(raw_chunk)
   local data_raw = string.match(raw_chunk, "data: (.+)")
-
   if data_raw then
     local data = vim.json.decode(data_raw)
 
