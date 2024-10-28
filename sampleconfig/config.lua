@@ -1,15 +1,15 @@
--- setup chatty and the openai config
+-- setup chatty and the anthropic config
 local chatty = require('chatty-ai')
-local openai = require('init') -- TODO this would be the plugin name
+local anthropic = require('init') -- TODO this would be the plugin name
 
----@type OpenAIConfig
-local openai_config = {
+---@type AnthropicConfig
+local anthropic_config = {
   -- change model etc
 }
 
 -- Create the services
 
-local s1 = openai.create_service('gpt-4o', openai_config)
+local s1 = anthropic.create_service('gpt-4o', anthropic_config)
 
 chatty.setup({})
 
