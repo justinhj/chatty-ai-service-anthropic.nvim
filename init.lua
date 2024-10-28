@@ -1,21 +1,6 @@
 local chatty = require('chatty-ai')
 
--- https://platform.openai.com/docs/api-reference/chat
-
--- > curl https://api.openai.com/v1/chat/completions \
---   -H "Content-Type: application/json" \
---   -H "Authorization: Bearer $OPENAI_API_KEY" \
---   -d '{
---      "model": "gpt-4o",
---      "messages": [{"role": "user", "content": "Say this is a test!"}],
---      "temperature": 0.7
---    }'
-
--- chunk response
--- {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "system_fingerprint": "fp_44709d6fcb", "choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}]}
-
--- {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1694268190,"model":"gpt-4o-mini", "system_fingerprint": "fp_44709d6fcb", "choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}]}
-
+-- https://docs.anthropic.com/en/api/getting-started
 
 ---@class CompletionServiceConfig
 ---@field public name string
@@ -26,17 +11,19 @@ local chatty = require('chatty-ai')
 ---@field public stream_cb function
 ---@field public configure_call function
 
----@class OpenAIConfig
+---@class AnthropicConfig
 ---@field api_key_name string?
 ---@field model string?
+---@field version string?
 
----@type OpenAIConfig
+---@type AnthropicConfig
 local default_config = {
-  api_key_name = 'OPENAI_API_KEY',
-  model = 'gpt-4o',
+  api_key_name = 'ANTHROPIC_API_KEY',
+  model = 'claude-3-5-sonnet-20240620',
+  version = '2023-06-01',
 }
 
-local OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
+local ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 
 local source = {}
 
@@ -52,80 +39,65 @@ end
 -- return url, headers, body
 source.configure_call = function(self, user_prompt, completion_config, is_stream)
   local config = self.config
-  local url = OPENAI_URL
+  local url = ANTHROPIC_URL
   local api_key = os.getenv(config.api_key_name)
   if not api_key then
-    error('OpenAI api key \'' .. config.api_key_name .. '\' not found in environment.')
+    error('anthropic api key \'' .. config.api_key_name .. '\' not found in environment.')
   end
   local headers = {
-      ['Authorization'] = 'Bearer ' .. api_key,
-      ['Content-Type'] = 'application/json',
+      ['x-api-key'] = api_key,
+      ['content-type'] = 'application/json',
+      ['anthropic-version'] = config.version,
     }
 
   local body = {
+    stream = is_stream,
     model = config.model,
     messages = {
-      { role = 'system',
-        content = completion_config.system
+      {
+        content = completion_config.prompt .. '\n' .. user_prompt,
+        role = 'user',
       },
-      { role = 'user',
-        content = user_prompt,
-      },
-    }
+    },
+    system = completion_config.system,
+    max_tokens = 8192
   }
 
-  if is_stream then
-    body['stream'] = true
-    body['stream_options'] = { include_usage = is_stream }
-  end
-
-  vim.print(vim.inspect(headers) .. vim.inspect(body))
+  vim.print(vim.inspect(headers) .. vim.inspect(body) .. ' url ' .. url)
   return url, headers, body
 end
 
-source.complete_cb = function(response)
-  local status, parsed_response = pcall(vim.fn.json_decode, response.body)
-  if status then
-    local input_tokens = parsed_response.usage.prompt_tokens or 0
-    local output_tokens = parsed_response.usage.completion_tokens or 0
-    local content = ''
-    local choice = parsed_response.choices[1]
-    content = choice.message.content
-
-    return {
-      content = content,
-      input_tokens = input_tokens,
-      output_tokens = output_tokens,
-    }
+source.complete_cb = function(raw_response)
+  local response = vim.fn.json_decode(raw_response.body)
+  local input_tokens = response.usage.input_tokens
+  local output_tokens = response.usage.output_tokens
+  local content = response.content
+  if content[1].type == 'text' then
+    return content[1].text, input_tokens, output_tokens
   else
-    error(parsed_response)
+    error('unexpected response type')
   end
 end
 
 source.stream_cb = function(raw_chunk)
-  local chunk = raw_chunk:gsub("^data: ", "")
-  if #chunk == 0 or chunk == '[DONE]' then
-    return ''
-  else
-    local status, data = pcall(vim.json.decode, chunk)
+  local data_raw = string.match(raw_chunk, "data: (.+)")
+
+  if data_raw then
+    local data = vim.json.decode(data_raw)
+
     local content = ''
-    if status then
-      if #data.choices == 0 or data.choices[1].finish_reason == 'stop' then
-        return ''
-      elseif data.choices and data.choices[1].delta then
-        content = data.choices[1].delta.content
-      end
+    if data.delta and data.delta.text then
+      content = data.delta.text
       return content
-    else
-      error(data)
     end
-    return content
   end
+  return ''
 end
 
 source.stream_complete_cb = function(response)
   local body = response.body
   local lines = {}
+  local text = ""
 
   for line in body:gmatch("[^\r\n]+") do
     table.insert(lines, line)
@@ -133,28 +105,24 @@ source.stream_complete_cb = function(response)
 
   local input_tokens = 0
   local output_tokens = 0
-  local content = ''
 
-  for _, raw_chunk in ipairs(lines) do
-    local chunk = raw_chunk:gsub("^data: ", "")
-    if #chunk == 0 or chunk == '[DONE]' then
-      return content, input_tokens, output_tokens
-    else
-      local status, data = pcall(vim.json.decode, chunk)
-      local content = ''
-      if status then
-        if #data.choices == 0 or data.choices[1].finish_reason == 'stop' then
-        elseif data.choices and data.choices[1].delta then
-          content = content .. data.choices[1].delta.content
-        elseif data.usage and type(data.usage) == 'table' then
-          input_tokens = data.usage.prompt_tokens
-          output_tokens = data.usage.completion_tokens
-        end
-      else
-        error(data)
+  for _, line in ipairs(lines) do
+    if not line:match("^event:") then
+      local stripped = line:gsub("^data: ", "")
+      local data = vim.fn.json_decode(stripped)
+      if data.type == "content_block_start" then
+        text = text .. data.content_block.text
+      elseif data.type == "content_block_delta" then
+        text = text .. data.delta.text
+      elseif data.type == 'message_start' then
+        input_tokens = data.message.usage.input_tokens
+      elseif data.type == 'message_delta' and data.delta.stop_reason == 'end_turn' then
+        output_tokens = data.usage.output_tokens
       end
     end
   end
+
+  return text, input_tokens, output_tokens
 end
 
 return {
